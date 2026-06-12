@@ -94,6 +94,7 @@ gptel uses Curl if available, but falls back to the built-in url-retrieve to wor
       - [[#aiml-api][AI/ML API]]
       - [[#github-copilotchat][GitHub CopilotChat]]
       - [[#aws-bedrock][AWS Bedrock]]
+      - [[#aws-bedrock-bedrock-mantle][AWS Bedrock (bedrock-mantle)]]
       - [[#moonshot-kimi][Moonshot (Kimi)]]
   - [[#usage][Usage]]
     - [[#in-any-buffer][In any buffer:]]
@@ -1239,6 +1240,39 @@ The above code makes the backend available to select.  If you want it to be the 
         ;; https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html
         :model-region 'apac))
 #+end_src
+
+#+html: </details>
+#+html: <details><summary>
+**** AWS Bedrock (bedrock-mantle)
+#+html: </summary>
+
+AWS Bedrock exposes two inference endpoints.  The =bedrock-runtime= endpoint, used by [[#aws-bedrock][~gptel-make-bedrock~]] above, speaks the Bedrock-native Converse protocol.  The newer =bedrock-mantle= endpoint instead exposes OpenAI-compatible APIs and hosts the OpenAI models (GPT-5.5, GPT-5.4, the =gpt-oss= family, ...).  Use ~gptel-make-bedrock-mantle~ to talk to it; it reuses gptel's OpenAI Chat Completions support and shares credential handling with the ~gptel-make-bedrock~ backend.
+
+Register a backend with
+
+#+begin_src emacs-lisp
+(gptel-make-bedrock-mantle "AWS-mantle"
+  ;; optionally enable streaming
+  :stream t
+  :region "us-east-2"
+  ;; subset of gptel--bedrock-mantle-models
+  :models '(gpt-5.5))
+#+end_src
+
+The backend posts to =https://bedrock-mantle.{region}.api.aws/openai/v1/responses= (the OpenAI Responses API) and sends the provider-prefixed Bedrock model ID (e.g. ~gpt-5.5~ becomes ="openai.gpt-5.5"=).  The OpenAI models do not support geographic or global cross-region inference profiles, so no ~:model-region~ prefix is applied to them.
+
+The default ~:models~ list (~gptel--bedrock-mantle-models~) covers the OpenAI models.  Mantle also serves models from other providers (Anthropic, DeepSeek, Qwen, Mistral Large 3, etc.); to use one, add its symbol to ~:models~ and register its Bedrock ID in ~gptel-bedrock-mantle--model-ids~.  See [[https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html][Endpoint availability]] for the authoritative per-model list.
+
+Authentication follows the same precedence as ~gptel-make-bedrock~:
+- (argument) ~:aws-bearer-token~ -- a Bedrock API key, which also works with the OpenAI SDK
+- (env. variable) ~AWS_BEARER_TOKEN_BEDROCK~
+- (argument) ~:aws-profile~
+- (env. variable) ~AWS_PROFILE~
+- (env. variable) ~AWS_ACCESS_KEY_ID~, ~AWS_SECRET_ACCESS_KEY~ and ~AWS_SESSION_TOKEN~
+
+*NOTE:* When authenticating with a Bedrock API key (bearer token), authentication is a simple ~Authorization~ header and curl is not required.  When authenticating with an AWS profile or IAM credentials, =curl= computes a SigV4 signature and version 8.9 or newer is required.
+
+You can pick this backend from the menu when using gptel (see [[#usage][Usage]]).
 
 #+html: </details>
 #+html: <details><summary>

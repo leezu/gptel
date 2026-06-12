@@ -55,85 +55,89 @@ USAGE is part of the response, INFO is the request plist."
 
 Return the text response accumulated since the last call to this
 function.  Additionally, mutate state INFO to add tool-use
-information if the stream contains it."
-  (let ((content-strs) wait)
+information if the stream contains it.
+
+This handles both SSE orderings: `event:\\ndata:' (OpenAI) and
+`data:\\nevent:' (AWS bedrock-mantle) by anchoring on the `data:'
+line and reading the event type from the JSON payload's `:type'
+field."
+  (let ((content-strs))
     (condition-case nil
-        (while (and (not wait) (re-search-forward "^event: *\\(.+\\)" nil t))
-          (let ((event-type (match-string 1)) data)
-            (forward-line 1)
-            (if (not (looking-at "data:" t))
-                (progn (goto-char (match-beginning 0)) ;not enough data, reset
-                       (setq wait t))
-              (forward-char 5)
-              (setq data (gptel--json-read))
-              (pcase event-type
-                ;; Text content delta
-                ("response.output_text.delta"
-                 (when-let* ((delta (plist-get data :delta))
-                             ((not (string-empty-p delta))))
-                   (push delta content-strs)))
-                ;; Function call arguments delta
-                ("response.function_call_arguments.delta"
-                 (when-let* ((delta (plist-get data :delta)))
-                   (plist-put info :partial_json
-                              (cons delta (plist-get info :partial_json)))))
-                ;; Function call completed (user-defined tools)
-                ("response.output_item.done"
-                 (when-let* ((item (plist-get data :item))
-                             ((equal (plist-get item :type) "function_call"))
-                             (tool-call
-                              (list :id (plist-get item :call_id)
-                                    :name (plist-get item :name)
-                                    :args (ignore-errors
-                                            (gptel--json-read-string
-                                             (plist-get item :arguments))))))
-                   (plist-put info :tool-use
-                              (cons tool-call (plist-get info :tool-use)))
-                   (plist-put info :partial_json nil)))
-                ;; Reasoning content
-                ((or "response.reasoning_summary_text.delta"
-                     "response.reasoning.delta")
-                 (when-let* ((delta (plist-get data :delta)))
-                   (plist-put info :reasoning
-                              (concat (plist-get info :reasoning) delta))))
-                ((or "response.reasoning_summary_text.done"
-                     "response.reasoning.done")
-                 (plist-put info :reasoning-block t))
-                ;; NOTE: backend tools are not supported in gptel yet, this
-                ;; parsing is for the future
-                ;; Web search completed (server-side tool)
-                ("response.web_search_call.completed"
-                 (push "\n[Web search completed]" content-strs))
-                ;; Code interpreter output (server-side tool)
-                ("response.code_interpreter_call.completed"
-                 (when-let* ((item (plist-get data :item))
-                             (results (plist-get item :results)))
-                   (cl-loop
-                    for result across results
-                    if (equal (plist-get result :type) "logs")
-                    do (push (format "\n```\n%s\n```" (plist-get result :logs))
-                             content-strs))))
-                ;; Response completed
-                ("response.completed"
-                 (when-let* ((tool-use (plist-get info :tool-use)))
-                   ;; Inject tool calls into prompt data for continuation
-                   ;; TODO(responses-api) Avoid re-encoding these tool calls,
-                   ;; especially :arguments
-                   (gptel--inject-prompt
-                    (plist-get info :backend) (plist-get info :data)
-                    (mapcar (lambda (tc)
-                              (list :type "function_call"
-                                    :call_id (plist-get tc :id)
-                                    :name (plist-get tc :name)
-                                    :arguments
-                                    (decode-coding-string
-                                     (gptel--json-encode (plist-get tc :args))
-                                     'utf-8 t)))
-                            tool-use)))
-                 (when-let* ((resp (plist-get data :response)))
-                   (plist-put info :stop-reason (plist-get resp :status))
-                   (gptel--openai-responses-update-tokens
-                    (plist-get resp :usage) info)))))))
+        (while (re-search-forward "^data: *" nil t)
+          (let* ((data (gptel--json-read))
+                 (event-type (plist-get data :type)))
+            ;; Skip past a trailing "event:" line if present
+            (when (looking-at "\nevent: ")
+              (forward-line 1)
+              (end-of-line))
+            (pcase event-type
+              ;; Text content delta
+              ("response.output_text.delta"
+               (when-let* ((delta (plist-get data :delta))
+                           ((not (string-empty-p delta))))
+                 (push delta content-strs)))
+              ;; Function call arguments delta
+              ("response.function_call_arguments.delta"
+               (when-let* ((delta (plist-get data :delta)))
+                 (plist-put info :partial_json
+                            (cons delta (plist-get info :partial_json)))))
+              ;; Function call completed (user-defined tools)
+              ("response.output_item.done"
+               (when-let* ((item (plist-get data :item))
+                           ((equal (plist-get item :type) "function_call"))
+                           (tool-call
+                            (list :id (plist-get item :call_id)
+                                  :name (plist-get item :name)
+                                  :args (ignore-errors
+                                          (gptel--json-read-string
+                                           (plist-get item :arguments))))))
+                 (plist-put info :tool-use
+                            (cons tool-call (plist-get info :tool-use)))
+                 (plist-put info :partial_json nil)))
+              ;; Reasoning content
+              ((or "response.reasoning_summary_text.delta"
+                   "response.reasoning.delta")
+               (when-let* ((delta (plist-get data :delta)))
+                 (plist-put info :reasoning
+                            (concat (plist-get info :reasoning) delta))))
+              ((or "response.reasoning_summary_text.done"
+                   "response.reasoning.done")
+               (plist-put info :reasoning-block t))
+              ;; NOTE: backend tools are not supported in gptel yet, this
+              ;; parsing is for the future
+              ;; Web search completed (server-side tool)
+              ("response.web_search_call.completed"
+               (push "\n[Web search completed]" content-strs))
+              ;; Code interpreter output (server-side tool)
+              ("response.code_interpreter_call.completed"
+               (when-let* ((item (plist-get data :item))
+                           (results (plist-get item :results)))
+                 (cl-loop
+                  for result across results
+                  if (equal (plist-get result :type) "logs")
+                  do (push (format "\n```\n%s\n```" (plist-get result :logs))
+                           content-strs))))
+              ;; Response completed
+              ("response.completed"
+               (when-let* ((tool-use (plist-get info :tool-use)))
+                 ;; Inject tool calls into prompt data for continuation
+                 ;; TODO(responses-api) Avoid re-encoding these tool calls,
+                 ;; especially :arguments
+                 (gptel--inject-prompt
+                  (plist-get info :backend) (plist-get info :data)
+                  (mapcar (lambda (tc)
+                            (list :type "function_call"
+                                  :call_id (plist-get tc :id)
+                                  :name (plist-get tc :name)
+                                  :arguments
+                                  (decode-coding-string
+                                   (gptel--json-encode (plist-get tc :args))
+                                   'utf-8 t)))
+                          tool-use)))
+               (when-let* ((resp (plist-get data :response)))
+                 (plist-put info :stop-reason (plist-get resp :status))
+                 (gptel--openai-responses-update-tokens
+                  (plist-get resp :usage) info))))))
       (error (goto-char (match-beginning 0))))
     (apply #'concat (nreverse content-strs))))
 
